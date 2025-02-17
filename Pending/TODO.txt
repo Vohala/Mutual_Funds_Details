@@ -1,0 +1,20 @@
+mail should trigger alternate i.e. once when price is up by 20% from minimum of last one year then next mail should trigger when price goes down by 20% from maximum of one year. so mail should start when market is up by 20% from its minimum
+
+
+Small cap 15 drop  20 up
+
+Large cap 10 drop 15 up
+
+Mid cap 15 drop 20 up
+
+
+
+
+Nippon small cap
+Axis small cap dir   https://finance.yahoo.com/quote/0P00011MAX.BO/
+HDFC Small cap dir   https://finance.yahoo.com/quote/0P0000XVAA.BO/
+HSBC Nifty 50 Index Dir Gro   https://finance.yahoo.com/quote/0P0001JIS1.BO/
+SBI Nifty Next 50 Index Fir Growth  https://finance.yahoo.com/quote/0P0001M6U0.BO/
+
+
+

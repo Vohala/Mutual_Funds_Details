@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Yahoo Finance Price Fetcher</title>
+</head>
+<body>
+  <h1>Yahoo Finance Price Fetcher</h1>
+  <div id="price">Loading price...</div>
+
+  <script>
+    async function fetchPrice() {
+      try {
+        const response = await fetch('/api/price');
+        if (!response.ok) {
+          throw new Error('Network response was not ok');
+        }
+        const data = await response.json();
+        document.getElementById('price').innerText = `Price: ${data.price}`;
+      } catch (error) {
+        document.getElementById('price').innerText = 'Error fetching price.';
+        console.error('Error:', error);
+      }
+    }
+
+    // Call the function when the page loads.
+    fetchPrice();
+  </script>
+</body>
+</html>
