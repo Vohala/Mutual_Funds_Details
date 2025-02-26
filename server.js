@@ -1,5 +1,3 @@
-//const MONGODB_URI = 'mongodb+srv://daryldynamic5:Lkps%409753@vohala.a2zchcl.mongodb.net/?retryWrites=true&w=majority&appName=Vohala';
-
 const express = require('express');
 const puppeteer = require('puppeteer');
 const mongoose = require('mongoose');
@@ -19,23 +17,28 @@ mongoose
   .catch(err => console.error('MongoDB connection error:', err));
 
 const priceHistorySchema = new mongoose.Schema({
-  price: {
-    type: String,
-    required: true,
-  },
-  fetchedAt: {
-    type: Date,
-    default: Date.now,
-  },
+  price: { type: String, required: true },
+  fetchedAt: { type: Date, default: Date.now },
+});
+
+const triggerEventSchema = new mongoose.Schema({
+  fundName: { type: String, required: true },
+  type: { type: String, enum: ['rise', 'drop'], required: true },
+  price: { type: Number, required: true },
+  refPrice: { type: Number, required: true },
+  date: { type: Date, required: true },
+  lastTrigger: { type: String, enum: ['rise', 'drop'], required: true }
 });
 
 const mutualFunds = [
-  { name: 'Axis Small Cap Dir', url: 'https://finance.yahoo.com/quote/0P00011MAX.BO/history/', model: mongoose.model('AxisSmallCapDir', priceHistorySchema) },
-  { name: 'HDFC Small Cap Dir', url: 'https://finance.yahoo.com/quote/0P0000XVAA.BO/history/', model: mongoose.model('HDFCSmallCapDir', priceHistorySchema) },
-  { name: 'HSBC Nifty 50 Index Dir Gro', url: 'https://finance.yahoo.com/quote/0P0001JIS1.BO/history/', model: mongoose.model('HSBCNifty50IndexDirGro', priceHistorySchema) },
-  { name: 'SBI Nifty Next 50 Index Dir Growth', url: 'https://finance.yahoo.com/quote/0P0001M6U0.BO/history/', model: mongoose.model('SBINiftyNext50IndexDirGrowth', priceHistorySchema) },
-  { name: 'Nippon Small Cap Dir Growth', url: 'https://finance.yahoo.com/quote/0P0000XVFY.BO/history/', model: mongoose.model('NipponSmallCapDirGrowth', priceHistorySchema) }
+  { name: 'Axis Small Cap Dir', url: 'https://finance.yahoo.com/quote/0P00011MAX.BO/history/', model: mongoose.model('AxisSmallCapDir', priceHistorySchema), type: 'Small Cap', dropThreshold: 0.15, riseThreshold: 0.20 },
+  { name: 'HDFC Small Cap Dir', url: 'https://finance.yahoo.com/quote/0P0000XVAA.BO/history/', model: mongoose.model('HDFCSmallCapDir', priceHistorySchema), type: 'Small Cap', dropThreshold: 0.15, riseThreshold: 0.20 },
+  { name: 'HSBC Nifty 50 Index Dir Gro', url: 'https://finance.yahoo.com/quote/0P0001JIS1.BO/history/', model: mongoose.model('HSBCNifty50IndexDirGro', priceHistorySchema), type: 'Large Cap', dropThreshold: 0.10, riseThreshold: 0.15 },
+  { name: 'SBI Nifty Next 50 Index Dir Growth', url: 'https://finance.yahoo.com/quote/0P0001M6U0.BO/history/', model: mongoose.model('SBINiftyNext50IndexDirGrowth', priceHistorySchema), type: 'Mid Cap', dropThreshold: 0.15, riseThreshold: 0.20 },
+  { name: 'Nippon Small Cap Dir Growth', url: 'https://finance.yahoo.com/quote/0P0000XVFY.BO/history/', model: mongoose.model('NipponSmallCapDirGrowth', priceHistorySchema), type: 'Small Cap', dropThreshold: 0.15, riseThreshold: 0.20 }
 ];
+
+const TriggerEvent = mongoose.model('TriggerEvent', triggerEventSchema);
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -52,13 +55,13 @@ function sendAlertEmail(type, fundName, currentPrice, refPrice) {
   let text = '';
 
   if (type === 'drop') {
-    subject = `${fundName} Alert: 15% Drop`;
-    text = `Alert: ${fundName} has dropped more than 15% from its maximum value over the past year.
+    subject = `${fundName} Alert: Significant Drop`;
+    text = `Alert: ${fundName} has dropped significantly from its maximum value over the past year.
 Current Price: ${currentPrice}
 Maximum Price (past year): ${refPrice}`;
   } else if (type === 'rise') {
-    subject = `${fundName} Alert: 20% Increase`;
-    text = `Alert: ${fundName} has risen more than 20% from its minimum value over the past year.
+    subject = `${fundName} Alert: Significant Rise`;
+    text = `Alert: ${fundName} has risen significantly from its minimum value over the past year.
 Current Price: ${currentPrice}
 Minimum Price (past year): ${refPrice}`;
   }
@@ -85,28 +88,70 @@ async function checkThreshold(fund, currentPrice) {
     const records = await fund.model.find({ fetchedAt: { $gte: oneYearAgo } });
     if (records.length === 0) return;
 
-    const prices = records
-      .map(record => parseFloat(record.price))
-      .filter(price => !isNaN(price));
-
+    const prices = records.map(record => parseFloat(record.price)).filter(price => !isNaN(price));
     if (prices.length === 0) return;
 
     const maxPrice = Math.max(...prices);
     const minPrice = Math.min(...prices);
 
-    if (maxPrice > 0) {
-      const dropRatio = (maxPrice - currentPrice) / maxPrice;
-      console.log(`${fund.name} Drop Ratio: ${dropRatio}`);
-      if (dropRatio >= 0.15) {
-        sendAlertEmail('drop', fund.name, currentPrice, maxPrice);
+    const dropRatio = (maxPrice - currentPrice) / maxPrice;
+    const riseRatio = (currentPrice - minPrice) / minPrice;
+
+    console.log(`${fund.name} - Drop Ratio: ${dropRatio}, Rise Ratio: ${riseRatio}`);
+
+    const lastTriggerEvent = await TriggerEvent.findOne({ fundName: fund.name }).sort({ date: -1 });
+    const lastTrigger = lastTriggerEvent ? lastTriggerEvent.lastTrigger : null;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // Check for rise first if no previous trigger or last was drop
+    if ((!lastTrigger || lastTrigger === 'drop') && riseRatio >= fund.riseThreshold) {
+      const existingRise = await TriggerEvent.findOne({
+        fundName: fund.name,
+        type: 'rise',
+        price: currentPrice,
+        date: { $gte: today, $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000) }
+      });
+
+      if (!existingRise) {
+        sendAlertEmail('rise', fund.name, currentPrice, minPrice);
+        const newTrigger = new TriggerEvent({
+          fundName: fund.name,
+          type: 'rise',
+          price: currentPrice,
+          refPrice: minPrice,
+          date: new Date(),
+          lastTrigger: 'rise'
+        });
+        await newTrigger.save();
+        console.log(`${fund.name} - New Rise event recorded`);
+      } else {
+        console.log(`${fund.name} - Rise event already recorded for today with price ${currentPrice}`);
       }
     }
+    else if (lastTrigger === 'rise' && dropRatio >= fund.dropThreshold) {
+      const existingDrop = await TriggerEvent.findOne({
+        fundName: fund.name,
+        type: 'drop',
+        price: currentPrice,
+        date: { $gte: today, $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000) }
+      });
 
-    if (minPrice > 0) {
-      const riseRatio = (currentPrice - minPrice) / minPrice;
-      console.log(`${fund.name} Rise Ratio: ${riseRatio}`);
-      if (riseRatio >= 0.2) {
-        sendAlertEmail('rise', fund.name, currentPrice, minPrice);
+      if (!existingDrop) {
+        sendAlertEmail('drop', fund.name, currentPrice, maxPrice);
+        const newTrigger = new TriggerEvent({
+          fundName: fund.name,
+          type: 'drop',
+          price: currentPrice,
+          refPrice: maxPrice,
+          date: new Date(),
+          lastTrigger: 'drop'
+        });
+        await newTrigger.save();
+        console.log(`${fund.name} - New Drop event recorded`);
+      } else {
+        console.log(`${fund.name} - Drop event already recorded for today with price ${currentPrice}`);
       }
     }
   } catch (error) {
@@ -122,9 +167,7 @@ async function getPrice(url) {
     });
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2' });
-    
     await page.waitForSelector('[data-testid="qsp-price"]', { timeout: 10000 });
-    
     const price = await page.$eval('[data-testid="qsp-price"]', el => el.textContent.trim());
     await browser.close();
     return price;
@@ -136,24 +179,21 @@ async function getPrice(url) {
 
 async function fetchAndStorePrice() {
   const today = new Date();
-  today.setHours(0, 0, 0, 0); // Normalize to start of day
+  today.setHours(0, 0, 0, 0);
   const tomorrow = new Date(today);
   tomorrow.setDate(today.getDate() + 1);
 
   for (const fund of mutualFunds) {
     try {
       const existingRecord = await fund.model.findOne({
-        fetchedAt: {
-          $gte: today,
-          $lt: tomorrow
-        }
+        fetchedAt: { $gte: today, $lt: tomorrow }
       });
 
       if (existingRecord) {
-        console.log(`Price for ${fund.name} already synced today at ${new Date(existingRecord.fetchedAt).toLocaleString()}. Skipping...`);
+        console.log(`Price for ${fund.name} already synced today at ${new Date(existingRecord.fetchedAt).toLocaleString()}. Skipping fetch...`);
         const currentPrice = parseFloat(existingRecord.price);
         if (!isNaN(currentPrice)) {
-          checkThreshold(fund, currentPrice);
+          await checkThreshold(fund, currentPrice);
         }
         continue;
       }
@@ -166,7 +206,7 @@ async function fetchAndStorePrice() {
 
         const currentPrice = parseFloat(price);
         if (!isNaN(currentPrice)) {
-          checkThreshold(fund, currentPrice);
+          await checkThreshold(fund, currentPrice);
         }
       } else {
         console.error(`No price fetched for ${fund.name}.`);
@@ -209,95 +249,21 @@ app.get('/', async (req, res) => {
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Mutual Funds Data</title>
         <style>
-          body {
-            background-color: #1a1a1a;
-            color: #00ff00;
-            font-family: 'Arial', sans-serif;
-            margin: 0;
-            padding: 20px;
-          }
-          header {
-            text-align: center;
-            padding: 20px;
-            background-color: #000000;
-            border-bottom: 2px solid #00ff00;
-          }
-          h1 {
-            margin: 0;
-            font-size: 2.5em;
-            color: #00ff00;
-          }
-          .container {
-            max-width: 1200px;
-            margin: 20px auto;
-          }
-          select {
-            background-color: #333333;
-            color: #00ff00;
-            border: 1px solid #00ff00;
-            padding: 10px;
-            font-size: 1em;
-            width: 100%;
-            max-width: 300px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-          }
-          table {
-            width: 100%;
-            border-collapse: collapse;
-            background-color: #2b2b2b;
-            box-shadow: 0 0 10px rgba(0, 255, 0, 0.1);
-          }
-          th, td {
-            border: 1px solid #00ff00;
-            padding: 12px;
-            text-align: left;
-          }
-          th {
-            background-color: #444444;
-            color: #00ff00;
-          }
-          tr:nth-child(even) {
-            background-color: #333333;
-          }
-          hr {
-            border: 0;
-            border-top: 1px solid #00ff00;
-            margin: 20px 0;
-          }
-          form {
-            background-color: #2b2b2b;
-            padding: 20px;
-            border-radius: 5px;
-            box-shadow: 0 0 10px rgba(0, 255, 0, 0.1);
-          }
-          input[type="file"] {
-            color: #00ff00;
-          }
-          button {
-            background-color: #00ff00;
-            color: #000000;
-            border: none;
-            padding: 10px 20px;
-            font-size: 1em;
-            cursor: pointer;
-            border-radius: 5px;
-            transition: background-color 0.3s;
-          }
-          button:hover {
-            background-color: #00cc00;
-          }
-          footer {
-            text-align: center;
-            padding: 20px;
-            color: #00ff00;
-            position: fixed;
-            bottom: 0;
-            width: 100%;
-            left: 0;
-            background-color: #000000;
-            border-top: 2px solid #00ff00;
-          }
+          body { background-color: #1a1a1a; color: #00ff00; font-family: 'Arial', sans-serif; margin: 0; padding: 20px; }
+          header { text-align: center; padding: 20px; background-color: #000000; border-bottom: 2px solid #00ff00; }
+          h1 { margin: 0; font-size: 2.5em; color: #00ff00; }
+          .container { max-width: 1200px; margin: 20px auto; }
+          select { background-color: #333333; color: #00ff00; border: 1px solid #00ff00; padding: 10px; font-size: 1em; width: 100%; max-width: 300px; border-radius: 5px; margin-bottom: 20px; }
+          table { width: 100%; border-collapse: collapse; background-color: #2b2b2b; box-shadow: 0 0 10px rgba(0, 255, 0, 0.1); }
+          th, td { border: 1px solid #00ff00; padding: 12px; text-align: left; }
+          th { background-color: #444444; color: #00ff00; }
+          tr:nth-child(even) { background-color: #333333; }
+          hr { border: 0; border-top: 1px solid #00ff00; margin: 20px 0; }
+          form { background-color: #2b2b2b; padding: 20px; border-radius: 5px; box-shadow: 0 0 10px rgba(0, 255, 0, 0.1); }
+          input[type="file"] { color: #00ff00; }
+          button { background-color: #00ff00; color: #000000; border: none; padding: 10px 20px; font-size: 1em; cursor: pointer; border-radius: 5px; transition: background-color 0.3s; }
+          button:hover { background-color: #00cc00; }
+          footer { text-align: center; padding: 20px; color: #00ff00; position: fixed; bottom: 0; width: 100%; left: 0; background-color: #000000; border-top: 2px solid #00ff00; }
         </style>
       </head>
       <body>
@@ -379,34 +345,11 @@ app.post('/import', upload.single('file'), async (req, res) => {
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Import Successful - Mutual Funds Data</title>
         <style>
-          body {
-            background-color: #1a1a1a;
-            color: #00ff00;
-            font-family: 'Arial', sans-serif;
-            margin: 0;
-            padding: 20px;
-            text-align: center;
-          }
-          h1 {
-            font-size: 2em;
-            color: #00ff00;
-          }
-          p {
-            font-size: 1.2em;
-          }
-          a {
-            color: #00ff00;
-            text-decoration: none;
-            padding: 10px 20px;
-            border: 1px solid #00ff00;
-            border-radius: 5px;
-            display: inline-block;
-            margin-top: 20px;
-          }
-          a:hover {
-            background-color: #00ff00;
-            color: #000000;
-          }
+          body { background-color: #1a1a1a; color: #00ff00; font-family: 'Arial', sans-serif; margin: 0; padding: 20px; text-align: center; }
+          h1 { font-size: 2em; color: #00ff00; }
+          p { font-size: 1.2em; }
+          a { color: #00ff00; text-decoration: none; padding: 10px 20px; border: 1px solid #00ff00; border-radius: 5px; display: inline-block; margin-top: 20px; }
+          a:hover { background-color: #00ff00; color: #000000; }
         </style>
       </head>
       <body>
